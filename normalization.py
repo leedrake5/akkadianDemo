@@ -2,14 +2,7 @@ import sys, os, datetime, pwd
 #os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 import json
 import torch
-import random
-import glob
-from tqdm.notebook import tqdm
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, Seq2SeqTrainer, Seq2SeqTrainingArguments, DataCollatorForSeq2Seq
-from datasets import DatasetDict, Dataset, concatenate_datasets
-from evaluate import load as load_metric
-import accelerate
-from accelerate import Accelerator
 from typing import List, Dict
 
 import numpy as np
@@ -24,19 +17,9 @@ from transformers.data.data_collator import DataCollatorForSeq2Seq,default_data_
 import pandas as pd
 import math,os
 import numpy as np
-from tqdm import tqdm
 import torch
 
 import os
-
-
-import logging
-logger = logging.getLogger('pytorch_lightning.utilities.rank_zero')
-class IgnorePLFilter(logging.Filter):
-    def filter(self, record):
-        return 'available:' not in record.getMessage()
-
-logger.addFilter(IgnorePLFilter())
 
 source_langs = set(["akk"])
 target_langs = set(["en"])
