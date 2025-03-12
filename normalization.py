@@ -4,6 +4,8 @@ import json
 import torch
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, Seq2SeqTrainer, Seq2SeqTrainingArguments, DataCollatorForSeq2Seq
 from typing import List, Dict
+import protobuf
+import google
 
 import numpy as np
 import sentencepiece
