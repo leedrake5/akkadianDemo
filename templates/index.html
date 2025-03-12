@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Akkadian Translator</title>
+</head>
+<body>
+  <h1>Translate</h1>
+  <form method="post">
+    <div>
+      <label for="cuneiform_text">Enter cuneiform text:</label><br>
+      <textarea id="cuneiform_text" name="cuneiform_text" rows="10" cols="60" placeholder="Paste cuneiform text here"></textarea>
+    </div>
+    <br>
+    <div>
+      <label for="prompt">Select prompt style:</label><br>
+      <select id="prompt" name="prompt">
+        {% for key, prompt in prompt_styles.items() %}
+          <option value="{{ key }}">{{ prompt }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <br>
+    <button type="submit">Translate</button>
+  </form>
+
+  {% if translation %}
+  <h2>Translation</h2>
+  <p>{{ translation }}</p>
+  {% endif %}
+</body>
+</html>
