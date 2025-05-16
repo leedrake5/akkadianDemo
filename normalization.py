@@ -1,70 +1,5 @@
-import sys, os, datetime, pwd
-#os.environ["CUDA_VISIBLE_DEVICES"] = "0"
-import json
-import torch
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM, Seq2SeqTrainer, Seq2SeqTrainingArguments, DataCollatorForSeq2Seq
-from typing import List, Dict
-import protobuf
-import google
-
-import numpy as np
-import sentencepiece
-
-import re
-import requests
-import unicodedata
-
-from transformers import Seq2SeqTrainer,Seq2SeqTrainingArguments, EarlyStoppingCallback, BertTokenizer,MT5ForConditionalGeneration
-from transformers.data.data_collator import DataCollatorForSeq2Seq,default_data_collator
+import re, sys, os, random, glob, typing, numpy, gc, re, requests, unicodedata,  logging, csv
 import pandas as pd
-import math,os
-import numpy as np
-import torch
-
-import os
-
-source_langs = set(["akk"])
-target_langs = set(["en"])
-
-def get_finetune_model_id(model_id):
-    model_dir = f"../results/{model_id}"
-    checkpoints = [(os.path.abspath(x), int(os.path.split(x)[1].split("-")[1])) for x in glob.glob(f"{model_dir}/checkpoint-*")]
-    checkpoints = sorted(checkpoints, key=lambda x: x[1])[-1]
-    return checkpoints[0]
-
-#os.environ["WANDB_NOTEBOOK_NAME"] = "TrainTranslator.ipynb"
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-base_model_id = "google-t5/t5-small"
-finetune_model_id = None
-
-is_bi = False
-use_paragraphs = True
-use_lines = True
-is_finetune = finetune_model_id is not None and len(finetune_model_id) > 1
-
-date_id = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-flags = ""
-suffix = ""
-if is_bi:
-    flags += "-bi"
-
-if use_paragraphs:
-    flags += "-p"
-
-if use_lines:
-    flags += "-l"
-
-if is_finetune:
-    flags += "-f"
-    suffix += f"-{os.path.basename(os.path.split(finetune_model_id)[0])}-{os.path.basename(finetune_model_id)}"
-
-model_id = f"{os.path.basename(base_model_id)}{flags}-{''.join(sorted(list(source_langs)))}-{''.join(sorted(list(target_langs)))}-{date_id}{suffix}"
-model_id
-
-
-device = torch.device("cuda" if torch.cuda.is_available() else "mps")
-
 
 # Turn a Unicode string to plain ASCII, thanks to
 # https://stackoverflow.com/a/518232/2809427
@@ -74,9 +9,24 @@ def unicodeToAscii(s):
         if unicodedata.category(c) != 'Mn'
     )
 
+def remove_doc_refs(text: str) -> str:
+    """
+    1) Remove any p<digits> tokens
+    2) Remove any standalone runs of 6 or more digits (e.g. '014209')
+    3) Collapse leftover whitespace
+    """
+    # 1) strip p<digits>
+    cleaned = re.sub(r'\bp\d+\b', '', text)
+    # 2) strip bare doc-IDs (6+ digits)
+    cleaned = re.sub(r'\b\d{6,}\b', '', cleaned)
+    # 3) collapse spaces
+    return re.sub(r'\s{2,}', ' ', cleaned).strip()
+
 REMOVE_BRACKETS_TRANS = str.maketrans({
     '(': ' ',
     ')': ' ',
+    '〈': ' ',
+    '〉': ' ',
     '˹': ' ',
     '˺': ' ',
     '⸢': ' ',
@@ -85,6 +35,7 @@ REMOVE_BRACKETS_TRANS = str.maketrans({
     '⌟': ' ',
     '˻': ' ',
     '˼': ' ',
+    '˽': ' ',
     '𐄇': ' ',
     '[': ' ',
     ']': ' ',
@@ -104,12 +55,16 @@ REMOVE_BRACKETS_TRANS = str.maketrans({
     '_': ' ',
     '/': ' ',
     ',': ' ',
+    ':': ' ',
+    '–': ' ',
+    '&': ' ',
     '!': '',
     '?': '',
     '#': '',
     '=': '',
     '%': '',
-    '$': ''
+    '$': '',
+    '𐄼': ''
 })
 
 def remove_brackets(s: str) -> str:
@@ -229,6 +184,7 @@ def normalizeString_en(s, use_prefix=False, task="Translate", target="cuneiform"
     s = s.strip()
     s = remove_brackets(s)
     s = gap_filler(s)
+    s = remove_doc_refs(s)
     #s = fix_cuneiform_gap(s)
     if use_prefix:
         if task=="Translate":
@@ -239,7 +195,7 @@ def normalizeString_en(s, use_prefix=False, task="Translate", target="cuneiform"
                     return 'Translate ' + modern + ' to simple ' + language + ' transliteration: ' + s
                 elif type == "group":
                     return 'Translate ' + modern + ' to grouped ' + language + ' transliteration: ' + s
-                elif type == "origional":
+                elif type == "original":
                     return 'Translate ' + modern + ' to complex ' + language + ' transliteration: ' + s
     else:
         return s
@@ -254,20 +210,27 @@ def normalizeString_cuneiform_transliterate(s, use_prefix=True, type="simple", l
         s = re.sub(r"([.!?])", r" \1", s)
         s = re.sub(r"[^a-zA-Z!?*]+", r" ", s)
         s = gap_filler(s)
+        s = remove_doc_refs(s)
         s = re.sub(r'\s+', ' ', s).strip()
-    elif type == "origional":
+    elif type == "original":
         s = unicodeToAscii(s.lower().strip())
         s = remove_brackets(s)
         s = normalize_digits(s)
         s = gap_filler(s)
+        s = remove_doc_refs(s)
         s = re.sub(r'\s+', ' ', s).strip()
+    elif type == "group":
+        s = unicodeToAscii(s.lower().strip())
+        s = normalize_digits(s)
+        s = gap_filler(s)
+        s = remove_doc_refs(s)
     normalized_string = s.strip()
     # 3) Fix spaced-out cuneiform gap tokens
     normalized_string = fix_cuneiform_gap(normalized_string)
     if use_prefix:
         if type == "simple":
             return 'Transliterate ' + language + ' cuneiform to simple Latin characters: ' + normalized_string
-        elif type == "origional":
+        elif type == "original":
             return 'Transliterate ' + language + ' cuneiform to complex Latin characters: ' + normalized_string
     else:
         return normalized_string
@@ -281,16 +244,20 @@ def normalizeString_cuneiform_rev_transliterate(s, use_prefix=True, type="simple
         s = re.sub(r"([.!?])", r" \1", s)
         s = re.sub(r"[^a-zA-Z!?*]+", r" ", s)
         s = gap_filler(s)
+        s = remove_doc_refs(s)
         s = re.sub(r'\s+', ' ', s).strip()
-    elif type == "origional":
+    elif type == "original":
         s = unicodeToAscii(s.lower().strip())
         s = remove_brackets(s)
         s = normalize_digits(s)
         s = gap_filler(s)
+        s = remove_doc_refs(s)
         s = re.sub(r'\s+', ' ', s).strip()
     elif type == "group":
         s = unicodeToAscii(s.lower().strip())
+        s = normalize_digits(s)
         s = gap_filler(s)
+        s = remove_doc_refs(s)
     normalized_string = s.strip()
     # 3) Fix spaced-out cuneiform gap tokens
     normalized_string = fix_cuneiform_gap(normalized_string)
@@ -299,7 +266,7 @@ def normalizeString_cuneiform_rev_transliterate(s, use_prefix=True, type="simple
             return 'Convert simple transliterated Latin characters to ' + language + ' cuneiform: ' + normalized_string
         elif type == "group":
             return 'Convert grouped transliterated Latin characters to ' + language + ' cuneiform: ' + normalized_string
-        elif type == "origional" :
+        elif type == "original" :
             return 'Convert complex transliterated Latin characters to ' + language + ' cuneiform: ' + normalized_string
     else:
         return normalized_string
@@ -313,16 +280,20 @@ def normalizeString_cuneiform_transliterate_translate(s, use_prefix=True, task="
         s = re.sub(r"([.!?])", r" \1", s)
         s = re.sub(r"[^a-zA-Z!?*]+", r" ", s)
         s = gap_filler(s)
+        s = remove_doc_refs(s)
         s = re.sub(r'\s+', ' ', s).strip()
-    elif type=="origional":
+    elif type=="original":
         s = unicodeToAscii(s.lower().strip())
         s = remove_brackets(s)
         s = normalize_digits(s)
         s = gap_filler(s)
+        s = remove_doc_refs(s)
         s = re.sub(r'\s+', ' ', s).strip()
     elif type == "group":
         s = unicodeToAscii(s.lower().strip())
+        s = normalize_digits(s)
         s = gap_filler(s)
+        s = remove_doc_refs(s)
     normalized_string = s.strip()
     # 3) Fix spaced-out cuneiform gap tokens
     normalized_string = fix_cuneiform_gap(normalized_string)
@@ -330,14 +301,14 @@ def normalizeString_cuneiform_transliterate_translate(s, use_prefix=True, task="
         if task == "Translate":
             if type == "simple":
                 return 'Translate simple ' + language + ' transliteration to ' + modern + ': ' + normalized_string
-            elif type == "origional":
+            elif type == "original":
                 return 'Translate complex ' + language + ' transliteration to ' + modern + ': ' + normalized_string
             elif type == "group":
                 return 'Translate grouped ' + language + ' transliteration to ' + modern + ': ' + normalized_string
         elif task == "Group":
             if type == "simple":
                 return 'Group simple ' + language + ' transliteration into likely words: ' + normalized_string
-            elif type == "origional":
+            elif type == "original":
                 return 'Group complex ' + language + ' transliteration into likely words: ' + normalized_string
     else:
         return normalized_string
@@ -345,13 +316,15 @@ def normalizeString_cuneiform_transliterate_translate(s, use_prefix=True, task="
 # Lowercase, trim, and remove non-letter characters
 def normalizeString_cuneiform_transliterate_minimal(s, use_prefix=True, language="Akkadian", modern="English"):
     s = unicodeToAscii(s.lower().strip())
+    s = normalize_digits(s)
     s = gap_filler(s)
+    s = remove_doc_refs(s)
     #s = re.sub(r"([.!?])", r" \1", s)
     #s = re.sub(r"[^a-zA-Z!?]+", r" ", s)
-    s = remove_brackets(s)
+    #s = remove_brackets(s)
     normalized_string = s.strip()
     # 3) Fix spaced-out cuneiform gap tokens
-    normalized_string = fix_cuneiform_gap(normalized_string)
+    #normalized_string = fix_cuneiform_gap(normalized_string)
     if use_prefix:
         return 'Translate ' + language + ' grouped transliteration to ' + modern + ': ' + normalized_string
     else:
@@ -374,6 +347,7 @@ def normalizeString_cuneiform(s, use_prefix=True, task="Translate", type="simple
     # This assumes each character in the string is a distinct sign, no need to join with spaces if already separated
     s = remove_brackets(s)
     s = gap_filler(s)
+    s = remove_doc_refs(s)
     normalized_string = ' '.join(s)  # This joins every character with a space, treating each as a separate token
     normalized_string = fix_suprasigillum(normalized_string)
     # Add the prefix if use_prefix is True
@@ -385,7 +359,7 @@ def normalizeString_cuneiform(s, use_prefix=True, task="Translate", type="simple
                 return 'Transliterate ' + language + ' cuneiform to simple Latin characters: ' + normalized_string
             elif type == "group":
                 return 'Transliterate ' + language + ' cuneiform to grouped Latin characters: ' + normalized_string
-            elif type == "origional":
+            elif type == "original":
                 return 'Transliterate ' + language + ' cuneiform to complex Latin characters: ' + normalized_string
     else:
         return normalized_string
@@ -472,36 +446,6 @@ def trim_singles(pairs, max_length1, max_length2, max_length_threshold, min_leng
         s1_final = normalize(s1_trunc)
         trimmed_pairs.append(s1_final)
     return trimmed_pairs
-
-def trim_pairs(pairs, max_length1, max_length2, max_length_threshold, min_length_threshold):
-    valid_pairs = []
-    for pair in pairs:
-        # Ensure the pair has 2 elements and neither is None
-        if pair and len(pair) == 2 and pair[0] and pair[1]:
-            valid_pairs.append(pair)
-    # Filter out pairs by word count threshold
-    max_filtered_pairs = [
-        (s1, s2) for s1, s2 in valid_pairs
-        if len(s1.split()) <= max_length_threshold and len(s2.split()) <= (max_length_threshold - 5)
-    ]
-    min_filtered_pairs = [
-        (s1, s2) for s1, s2 in max_filtered_pairs
-        if len(s1.split()) >= min_length_threshold and len(s2.split()) >= min_length_threshold
-    ]
-    trimmed_pairs = []
-    for s1, s2 in min_filtered_pairs:
-        # Normalize
-        s1_norm = normalize(s1)
-        s2_norm = normalize(s2)
-        # Truncate
-        s1_trunc = s1_norm[:max_length1]
-        s2_trunc = s2_norm[:max_length2]
-        # Normalize again
-        s1_final = normalize(s1_trunc)
-        s2_final = normalize(s2_trunc)
-        trimmed_pairs.append((s1_final, s2_final))
-    return trimmed_pairs
-
 
 def trim_pairs(pairs, max_length1, max_length2, max_length_threshold, min_length_threshold):
     valid_pairs = []
